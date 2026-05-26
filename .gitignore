@@ -1,0 +1,83 @@
+# ---------------------------------------------------------------------------
+# Python
+# ---------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# ---------------------------------------------------------------------------
+# Virtual environments
+# ---------------------------------------------------------------------------
+.venv/
+venv/
+env/
+ENV/
+
+# ---------------------------------------------------------------------------
+# Testing / coverage / typing caches
+# ---------------------------------------------------------------------------
+.pytest_cache/
+pytest-cache-files-*/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.coverage
+.coverage.*
+*.coverage.*
+htmlcov/
+coverage.xml
+
+# ---------------------------------------------------------------------------
+# Docs build
+# ---------------------------------------------------------------------------
+site/
+docs/_build/
+
+# ---------------------------------------------------------------------------
+# Project run artifacts (simulation outputs, generated media, caches)
+# Keep the repo clean of large/binary regenerable outputs.
+# ---------------------------------------------------------------------------
+runs/
+results/
+*.log
+outputs/
+*.gif
+*.mp4
+# But DO keep curated portfolio media committed under docs/assets/
+!docs/assets/**/*.gif
+!docs/assets/**/*.mp4
+
+# ---------------------------------------------------------------------------
+# XFOIL scratch files (generated when shelling out to the binary)
+# ---------------------------------------------------------------------------
+*.pol
+*.cp
+*.bl
+:00.bl
+fort.*
+
+# ---------------------------------------------------------------------------
+# IDEs / OS
+# ---------------------------------------------------------------------------
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db

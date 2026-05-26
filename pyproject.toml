@@ -1,0 +1,170 @@
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+# ---------------------------------------------------------------------------
+# Project metadata
+# ---------------------------------------------------------------------------
+[project]
+name = "aeroforge"
+version = "0.1.0"
+description = "A professional, object-oriented Python wrapper around the XFOIL 2D aerodynamic solver, with airfoil geometry tooling, multi-objective optimization, and publication-grade visualization."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "Valentin Caries", email = "valentin.caries13@gmail.com" }]
+keywords = [
+    "xfoil",
+    "aerodynamics",
+    "cfd",
+    "airfoil",
+    "optimization",
+    "pymoo",
+    "scientific-computing",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Physics",
+    "Operating System :: OS Independent",
+]
+
+# Runtime dependencies kept intentionally lean. Heavy / optional capabilities
+# (optimization, plotting) live in extras so the geometry + solver core can be
+# installed in minimal environments (e.g. CI runners, HPC nodes).
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "pydantic>=2.5",
+    "pydantic-settings>=2.1",
+]
+
+[project.optional-dependencies]
+optim = ["pymoo>=0.6.1"]
+viz = ["matplotlib>=3.7", "imageio>=2.31", "imageio-ffmpeg>=0.4"]
+io = ["pandas>=2.0", "pyarrow>=14.0"]
+cli = ["typer>=0.9", "rich>=13.0"]
+# Convenience meta-extra that pulls in everything an end user typically wants.
+all = [
+    "aeroforge[optim,viz,io,cli]",
+]
+# Developer tooling: linting, typing, testing, docs, pre-commit.
+dev = [
+    "aeroforge[all]",
+    "pytest>=7.4",
+    "pytest-cov>=4.1",
+    "pytest-mock>=3.12",
+    "hypothesis>=6.90",
+    "ruff>=0.3",
+    "black>=24.0",
+    "mypy>=1.8",
+    "pre-commit>=3.6",
+    "mkdocs-material>=9.5",
+    "mkdocstrings[python]>=0.24",
+]
+
+[project.urls]
+Homepage = "https://github.com/vcaries/airfoil_optimization"
+Repository = "https://github.com/vcaries/airfoil_optimization"
+Portfolio = "https://vcaries.github.io"
+
+[project.scripts]
+aeroforge = "aeroforge.cli.main:app"
+
+# ---------------------------------------------------------------------------
+# Hatch build configuration (src layout)
+# ---------------------------------------------------------------------------
+[tool.hatch.build.targets.wheel]
+packages = ["src/aeroforge"]
+
+# ---------------------------------------------------------------------------
+# Ruff: fast linter + import sorter (replaces flake8 + isort)
+# ---------------------------------------------------------------------------
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "N",   # pep8-naming
+    "D",   # pydocstyle (docstrings)
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+    "C4",  # flake8-comprehensions
+    "SIM", # flake8-simplify
+    "NPY", # numpy-specific rules
+]
+ignore = [
+    "D105", # missing docstring in magic method
+    "D107", # missing docstring in __init__ (documented at class level)
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["D"]        # docstrings not enforced in tests
+"examples/*" = ["D"]
+"__init__.py" = ["F401"] # re-exports are intentional
+
+# ---------------------------------------------------------------------------
+# Black: opinionated formatter
+# ---------------------------------------------------------------------------
+[tool.black]
+line-length = 100
+target-version = ["py310"]
+
+# ---------------------------------------------------------------------------
+# mypy: static typing
+# ---------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+no_implicit_optional = true
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = ["pymoo.*", "matplotlib.*", "imageio.*", "imageio_ffmpeg.*", "scipy.*", "cycler.*", "typer.*", "rich.*", "pydantic_settings.*"]
+ignore_missing_imports = true
+
+# ---------------------------------------------------------------------------
+# Pytest
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+minversion = "7.0"
+addopts = "-ra -q --strict-markers"
+testpaths = ["tests"]
+markers = [
+    "unit: fast, isolated unit tests (no external binaries)",
+    "integration: tests that exercise the real XFOIL binary",
+    "slow: long-running tests (optimization loops)",
+]
+
+# ---------------------------------------------------------------------------
+# Coverage
+# ---------------------------------------------------------------------------
+[tool.coverage.run]
+source = ["aeroforge"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+    "@(abc\\.)?abstractmethod",
+]
