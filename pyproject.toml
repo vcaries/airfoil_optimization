@@ -136,7 +136,7 @@ no_implicit_optional = true
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["pymoo.*", "matplotlib.*", "imageio.*", "imageio_ffmpeg.*", "scipy.*", "cycler.*", "typer.*", "rich.*", "pydantic_settings.*"]
+module = ["pymoo.*", "matplotlib.*", "imageio.*", "imageio_ffmpeg.*", "scipy.*", "cycler.*", "typer.*", "rich.*", "pydantic_settings.*", "pandas.*", "pyarrow.*"]
 ignore_missing_imports = true
 
 # ---------------------------------------------------------------------------
