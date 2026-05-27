@@ -8,7 +8,7 @@ Requires the ``optim`` extra.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -25,7 +25,7 @@ class GenerationSnapshot:
         generation: Zero-based generation index.
         x: ``(pop, n_var)`` genome matrix.
         f: ``(pop, n_obj)`` objective matrix.
-        g: ``(pop, n_constr)`` constraint matrix.
+        g: ``(pop, n_constr)`` constraint matrix (``None`` if no constraints).
     """
 
     generation: int
@@ -34,17 +34,20 @@ class GenerationSnapshot:
     g: FloatArray | None = None
 
 
-@dataclass(slots=True)
 class HistoryCallback(Callback):
     """Capture a :class:`GenerationSnapshot` after each generation.
 
     The collected history feeds the animation pipeline in
-    :mod:`aeroforge.visualization.animation`.
+    :mod:`aeroforge.visualization.animation`, the convergence-history plots,
+    and the optimization-study checkpoint mechanism.
     """
 
-    snapshots: list[GenerationSnapshot] = field(default_factory=list)
+    def __init__(self) -> None:
+        """Initialize pymoo's Callback state plus the snapshot buffer."""
+        super().__init__()
+        self.snapshots: list[GenerationSnapshot] = []
 
-    def notify(self, algorithm: Any, **kwargs: Any) -> None:  # pragma: no cover
+    def notify(self, algorithm: Any, **kwargs: Any) -> None:
         """Pymoo hook called once per generation.
 
         Args:
@@ -52,10 +55,35 @@ class HistoryCallback(Callback):
             **kwargs: Unused, kept for pymoo signature compatibility.
         """
         pop = algorithm.pop
+        x_raw = pop.get("X")
+        f_raw = pop.get("F")
+        g_raw = pop.get("G")
         snapshot = GenerationSnapshot(
-            generation=algorithm.n_gen - 1,
-            x=np.array(pop.get("X"), dtype=float),
-            f=np.array(pop.get("F"), dtype=float),
-            g=(np.array(pop.get("G"), dtype=float) if pop.get("G") is not None else None),
+            generation=int(algorithm.n_gen) - 1,
+            x=np.asarray(x_raw, dtype=float),
+            f=np.asarray(f_raw, dtype=float),
+            g=np.asarray(g_raw, dtype=float) if g_raw is not None else None,
         )
         self.snapshots.append(snapshot)
+
+    # ------------------------------------------------------------------ #
+    # Convenience
+    # ------------------------------------------------------------------ #
+    def best_per_generation(self) -> FloatArray:
+        """Return the best (minimum) objective value seen at each generation.
+
+        Single-objective only; multi-objective callers should use a Pareto
+        plot instead.
+
+        Returns:
+            A 1D array of length ``len(snapshots)`` with the minimum F per
+            generation, or an empty array if no generations have been
+            captured yet.
+        """
+        if not self.snapshots:
+            return np.asarray([], dtype=float)
+        return np.asarray([float(np.min(s.f)) for s in self.snapshots], dtype=float)
+
+    def __len__(self) -> int:
+        """int: Number of generations captured so far."""
+        return len(self.snapshots)
