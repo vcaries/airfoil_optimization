@@ -31,8 +31,8 @@ class AirfoilProblem(Problem):
     def __init__(self, evaluator: AirfoilEvaluator) -> None:
         """Wire the design space and counts into the pymoo base class."""
         lower, upper = evaluator.design_space.bounds
-        n_obj = len(evaluator.objectives)
-        n_ieq_constr = len(evaluator.geometric_constraints) + len(evaluator.physical_constraints)
+        n_obj = evaluator.n_obj
+        n_ieq_constr = evaluator.n_constr
         super().__init__(
             n_var=evaluator.design_space.n_var,
             n_obj=n_obj,
@@ -53,11 +53,24 @@ class AirfoilProblem(Problem):
 
         Args:
             x: ``(pop_size, n_var)`` matrix of genome vectors.
-            out: Output dict; pymoo expects ``out["F"]`` and ``out["G"]``.
+            out: Output dict; pymoo expects ``out["F"]`` (and optionally
+                ``out["G"]``).
             *args: Forwarded positional args from pymoo (unused here).
             **kwargs: Forwarded keyword args from pymoo (unused here).
-
-        Raises:
-            NotImplementedError: Implementation planned for milestone M3.
         """
-        raise NotImplementedError("AirfoilProblem._evaluate (planned, M3).")
+        pop = x.shape[0]
+        n_obj = self.n_obj
+        n_constr = self.n_ieq_constr
+
+        f_out = np.empty((pop, n_obj), dtype=np.float64)
+        g_out = np.empty((pop, n_constr), dtype=np.float64) if n_constr > 0 else None
+
+        for i in range(pop):
+            f, g = self._evaluator.evaluate(x[i])
+            f_out[i, :] = f
+            if g_out is not None:
+                g_out[i, :] = g
+
+        out["F"] = f_out
+        if g_out is not None:
+            out["G"] = g_out
