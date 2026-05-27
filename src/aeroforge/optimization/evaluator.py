@@ -87,6 +87,26 @@ class AirfoilEvaluator:
         return self.n_geometric_constraints + self.n_physical_constraints
 
     # ------------------------------------------------------------------ #
+    # Convenience: genome -> airfoil
+    # ------------------------------------------------------------------ #
+    def genome_to_airfoil(self, x: FloatArray) -> Airfoil:
+        """Decode a genome vector into the corresponding :class:`Airfoil`.
+
+        This is a thin convenience wrapper around the design space and the
+        airfoil factory. It is what visualization helpers call so they can
+        reconstruct the best-so-far airfoil for each generation without
+        importing the optimization layer themselves.
+
+        Args:
+            x: The flat genome vector in :attr:`design_space` order.
+
+        Returns:
+            The :class:`Airfoil` produced by :attr:`airfoil_factory`.
+        """
+        params = self.design_space.to_mapping(x)
+        return self.airfoil_factory(params)
+
+    # ------------------------------------------------------------------ #
     # The hot path
     # ------------------------------------------------------------------ #
     def evaluate(self, x: FloatArray) -> tuple[list[float], list[float]]:
