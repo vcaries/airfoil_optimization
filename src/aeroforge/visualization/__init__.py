@@ -9,10 +9,12 @@ from aeroforge.visualization.animation import (
     animate_geometry_evolution,
     animate_pareto_evolution,
 )
-from aeroforge.visualization.pareto import plot_pareto_front
+from aeroforge.visualization.pareto import non_dominated_mask, plot_pareto_front
 from aeroforge.visualization.plots import (
+    plot_cl_alpha,
     plot_convergence_history,
     plot_cp,
+    plot_drag_polar,
     plot_geometry,
     plot_polar,
 )
@@ -22,10 +24,13 @@ __all__ = [
     "use_portfolio_style",
     "PORTFOLIO_PALETTE",
     "plot_geometry",
+    "plot_cl_alpha",
+    "plot_drag_polar",
     "plot_polar",
     "plot_cp",
     "plot_convergence_history",
     "plot_pareto_front",
+    "non_dominated_mask",
     "animate_geometry_evolution",
     "animate_pareto_evolution",
 ]
