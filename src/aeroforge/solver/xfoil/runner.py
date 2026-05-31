@@ -136,7 +136,15 @@ class XfoilRunner(AbstractSolver):
             n_crit=self.n_crit,
             repanel=self.repanel,
         )
-        transcript = session.to_command_script(dat_path=str(dat_path), polar_path=str(polar_path))
+        # XFOIL's FORTRAN free-format parser truncates filenames at the first
+        # ``:`` character — so on Windows the absolute path ``C:\Users\...``
+        # collapses to just ``C`` and ``LOAD`` fails with "Nonexistent file: C".
+        # We launch the subprocess with ``cwd=workdir`` (a few lines below), so
+        # XFOIL can resolve the basenames without any path component at all.
+        transcript = session.to_command_script(
+            dat_path=dat_path.name,
+            polar_path=polar_path.name,
+        )
 
         _log.debug(
             "Invoking XFOIL: alpha=%.3f Re=%.3e Mach=%.3f iter=%d ncrit=%.1f",
@@ -147,15 +155,48 @@ class XfoilRunner(AbstractSolver):
             self.n_crit,
         )
 
+        # IMPORTANT — pass stdin as raw bytes with explicit ``\n`` separators.
+        # Using ``text=True`` makes Python translate every ``\n`` in the
+        # transcript into the platform-native line ending. On Windows that
+        # turns ``LOAD\nairfoil.dat\n...`` into ``LOAD\r\nairfoil.dat\r\n...``,
+        # and many XFOIL builds (notably MinGW) treat ``LOAD\r`` as a different
+        # token from ``LOAD``: the command is silently dropped, XFOIL falls
+        # back to the top menu, the polar accumulator is never opened, and the
+        # caller sees a mysterious "produced no polar output" :class:`ConvergenceError`.
+        # Encoding the transcript ourselves and asking for byte I/O bypasses
+        # the universal-newlines translator entirely and behaves identically
+        # on Linux, macOS, and Windows.
+        # On Windows, ``subprocess.run`` would otherwise flash a console
+        # window for every XFOIL call — with thousands of calls per GA run
+        # that's a continuous flicker. We suppress it two ways at once:
+        #
+        # * ``CREATE_NO_WINDOW`` (creationflags): tells Windows not to give
+        #   the new process its own console at all.
+        # * ``STARTUPINFO`` with ``STARTF_USESHOWWINDOW`` + ``SW_HIDE``: in
+        #   case the XFOIL binary tries to call ``AllocConsole()`` or open
+        #   its own graphics window despite the previous flag (some MinGW
+        #   builds do this on startup), Windows still hides whatever it
+        #   asks to show.
+        #
+        # Both names live in :mod:`subprocess` only on Windows; on POSIX
+        # they resolve to ``0`` / ``None`` and are silently ignored.
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        startupinfo = None
+        if hasattr(subprocess, "STARTUPINFO"):
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= getattr(subprocess, "STARTF_USESHOWWINDOW", 0)
+            startupinfo.wShowWindow = getattr(subprocess, "SW_HIDE", 0)
         try:
             proc = subprocess.run(
                 [self.binary],
-                input=transcript,
+                input=transcript.encode("ascii", errors="replace"),
                 capture_output=True,
-                text=True,
+                text=False,
                 timeout=self.timeout_s,
                 cwd=str(workdir),
                 check=False,
+                creationflags=creationflags,
+                startupinfo=startupinfo,
             )
         except subprocess.TimeoutExpired as exc:
             raise XfoilExecutionError(
@@ -170,17 +211,37 @@ class XfoilRunner(AbstractSolver):
                 f"Failed to launch XFOIL binary {self.binary!r}: {exc}"
             ) from exc
 
+        def _decode(buf: bytes | str | None) -> str:
+            # Robust against monkeypatched ``subprocess.run`` fakes that may
+            # still hand us ``str`` instead of ``bytes`` in tests.
+            if buf is None:
+                return ""
+            if isinstance(buf, bytes):
+                return buf.decode("utf-8", errors="replace")
+            return str(buf)
+
         if proc.returncode != 0:
-            tail = (proc.stderr or proc.stdout or "")[-2000:]
+            tail = (_decode(proc.stderr) or _decode(proc.stdout) or "")[-2000:]
             raise XfoilExecutionError(
                 f"XFOIL exited with code {proc.returncode} at "
                 f"alpha={point.alpha:.3f} deg.\n--- stderr/stdout tail ---\n{tail}"
             )
 
         if not polar_path.exists():
+            # No polar.pol means either XFOIL couldn't converge OR (much more
+            # commonly when this fires for *every* candidate) the command
+            # script never reached the PACC accumulator at all. Attach the
+            # transcript + stdout/stderr tails so the caller can see where
+            # XFOIL actually stopped.
+            stdout_tail = _decode(proc.stdout)[-1500:]
+            stderr_tail = _decode(proc.stderr)[-500:]
+            transcript_preview = transcript if len(transcript) < 600 else transcript[:600] + "..."
             raise ConvergenceError(
                 f"XFOIL produced no polar output at alpha={point.alpha:.3f} deg; "
-                "the operating point failed to converge.",
+                "the operating point failed to converge.\n"
+                f"--- transcript sent to XFOIL ---\n{transcript_preview}\n"
+                f"--- XFOIL stdout tail ---\n{stdout_tail}\n"
+                f"--- XFOIL stderr tail ---\n{stderr_tail}",
                 alpha=point.alpha,
             )
 
