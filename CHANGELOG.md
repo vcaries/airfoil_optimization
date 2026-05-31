@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] — 2026-05
+
+### Fixed
+- Make XFOIL actually usable on Windows:
+  - `XfoilRunner.analyze` now feeds the stdin transcript as raw bytes
+    (`text=False`) so Python no longer translates `\n` into `\r\n` — some
+    XFOIL builds silently dropped any command followed by `\r`.
+  - DAT and PACC filenames are passed as basenames (the subprocess already
+    runs with `cwd=workdir`). XFOIL's FORTRAN parser truncates filenames
+    at the first `:`, so the previous absolute paths
+    (`C:\Users\…\airfoil.dat`) were read as just `C` and every LOAD
+    failed with "Nonexistent file: C".
+  - The XFOIL console window is suppressed via `CREATE_NO_WINDOW` plus a
+    `STARTUPINFO` with `STARTF_USESHOWWINDOW` + `SW_HIDE`, so long GA
+    runs no longer flicker thousands of cmd windows on Windows.
+- `ConvergenceError` now embeds the XFOIL transcript and stdout/stderr
+  tails so future failures are diagnosable in one log line.
+
+### Added — Robustness in `examples/04_full_pipeline.py`
+- `AggregatedXfoilSolver` translates per-point XFOIL failures to
+  `SolverError` (caught by `AirfoilEvaluator.evaluate` and turned into
+  sentinel values) instead of raising `RuntimeError`, which used to
+  abort the whole pymoo run.
+- Per-run feasibility diagnostic prints how many candidates were
+  geometrically infeasible, XFOIL-failed, physically-infeasible, or
+  fully feasible, plus best CL/CD seen — empty-Pareto symptoms are now
+  diagnosable in one glance.
+- First-N XFOIL exception traces (default 3, configurable via
+  `debug_max_traces`) so initial failures of a long run are shown
+  verbatim instead of swallowed.
+
 ## [0.2.0] — 2026-05
 
 ### Added — M6: Portfolio polish & mission-aware demo
@@ -127,6 +158,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   repo layout, module map, design patterns, public ABCs, roadmap,
   dependencies, testing/visualization/Git strategies.
 
-[Unreleased]: https://github.com/vcaries/airfoil_optimization/compare/v0.2.0...main
+[Unreleased]: https://github.com/vcaries/airfoil_optimization/compare/v0.2.1...main
+[0.2.1]: https://github.com/vcaries/airfoil_optimization/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/vcaries/airfoil_optimization/compare/v0.1.0-M1...v0.2.0
 [0.1.0-M1]: https://github.com/vcaries/airfoil_optimization/releases/tag/v0.1.0-M1

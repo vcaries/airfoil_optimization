@@ -7,7 +7,7 @@ build-backend = "hatchling.build"
 # ---------------------------------------------------------------------------
 [project]
 name = "aeroforge"
-version = "0.2.0"
+version = "0.2.1"
 description = "A professional, object-oriented Python wrapper around the XFOIL 2D aerodynamic solver, with airfoil geometry tooling, multi-objective optimization, and publication-grade visualization."
 readme = "README.md"
 requires-python = ">=3.10"
