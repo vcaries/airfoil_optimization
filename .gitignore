@@ -72,6 +72,11 @@ outputs/
 *.bl
 :00.bl
 fort.*
+# But keep the test fixtures under tests/data/ tracked.
+!tests/data/**/*.pol
+!tests/data/**/*.cp
+!tests/data/**/*.bl
+*.png
 
 # ---------------------------------------------------------------------------
 # IDEs / OS

@@ -766,13 +766,13 @@ the architecture is meant to pass.
 | `geometry` | cosine/linear/repanel/transforms | ✅ implemented (smoothing planned) |
 | `geometry` | CST / Bézier / PARSEC | 🔲 interface scaffolded |
 | `solver.xfoil` | command DSL, session | ✅ implemented |
-| `solver.xfoil` | `XfoilRunner` (subprocess), parser | 🔲 scaffolded — M2 |
-| `solver.convergence` | strategies & pipeline | 🔲 scaffolded — M2 |
-| `campaigns` | sweep / runner / store | 🔲 scaffolded — M4 |
+| `solver.xfoil` | `XfoilRunner` (subprocess), parser | ✅ implemented + tested (M2) |
+| `solver.convergence` | strategies & pipeline | ✅ implemented + tested (M2) |
+| `campaigns` | sweep / runner / store | ✅ implemented + tested (M4) |
 | `optimization` | variables, objectives, constraints, penalties | ✅ implemented (skeletons) |
-| `optimization` | evaluator, problem, study | 🔲 scaffolded — M3 |
+| `optimization` | evaluator, problem, study | ✅ implemented + tested (M3) |
 | `visualization` | style + palettes | ✅ implemented |
-| `visualization` | plots / pareto / animation | 🔲 scaffolded — M5 |
+| `visualization` | plots / pareto / animation | ✅ implemented + tested (M5) |
 | `cli` | typer app | ✅ minimal (`airfoil naca` works) |
 | project | CI, pre-commit, ruff/black/mypy/pytest | ✅ wired |
 | project | mkdocs docs site | ✅ skeleton |

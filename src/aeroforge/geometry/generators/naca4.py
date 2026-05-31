@@ -142,11 +142,12 @@ class NACA4Generator(AirfoilGenerator):
             The half-thickness at each station.
         """
         a4 = _A4_CLOSED if self.trailing_edge is TrailingEdge.CLOSED else _A4_OPEN
-        return (
+        yt = (
             5.0
             * self._thickness
             * (_A0 * np.sqrt(xc) + _A1 * xc + _A2 * xc**2 + _A3 * xc**3 + a4 * xc**4)
         )
+        return np.asarray(yt, dtype=np.float64)
 
     def _camber_line(self, xc: FloatArray) -> tuple[FloatArray, FloatArray]:
         """Compute the camber line ``yc(x)`` and its slope ``dyc/dx``.

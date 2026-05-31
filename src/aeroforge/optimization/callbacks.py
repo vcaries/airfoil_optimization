@@ -48,7 +48,7 @@ class HistoryCallback(Callback):
         self.snapshots: list[GenerationSnapshot] = []
 
     def notify(self, algorithm: Any, **kwargs: Any) -> None:
-        """Pymoo hook called once per generation.
+        """Hook called by pymoo once per generation.
 
         Args:
             algorithm: The driving pymoo algorithm instance.
