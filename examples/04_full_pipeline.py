@@ -82,6 +82,7 @@ import numpy as np
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 
+from aeroforge.core.exceptions import SolverError
 from aeroforge.core.types import OperatingPoint
 from aeroforge.geometry import Airfoil, NACA4Generator
 from aeroforge.optimization import (
@@ -300,6 +301,10 @@ class AggregatedXfoilSolver(AbstractSolver):
     timeout_s: float = 30.0
     x_trip_upper: float | None = None
     x_trip_lower: float | None = None
+    # Debug helpers — print the first N XFOIL exceptions verbatim so we can
+    # see what's really happening when the failure rate looks suspicious.
+    debug_max_traces: int = 10
+    _traces_printed: int = field(default=0, init=False, repr=False)
 
     def _runner(self) -> Any:
         from aeroforge.solver import XfoilRunner
@@ -326,16 +331,41 @@ class AggregatedXfoilSolver(AbstractSolver):
         pt = self._runner().analyze(airfoil, op)
         return float(pt.cl), float(pt.cd), float(pt.cm)
 
+    def _maybe_print_trace(self, mp_name: str, airfoil: Airfoil, exc: BaseException) -> None:
+        if self._traces_printed >= self.debug_max_traces:
+            return
+        self._traces_printed += 1
+        head = f"  [xfoil-debug #{self._traces_printed}] {airfoil.name} @ {mp_name}"
+        body = f"    {type(exc).__name__}: {exc}"
+        print(head)
+        # Print up to ~60 lines so multi-section diagnostic messages
+        # (transcript, stdout tail, stderr tail) are visible in full.
+        for line in body.splitlines()[:60]:
+            print(line)
+        if self._traces_printed == self.debug_max_traces:
+            print(
+                "  [xfoil-debug] suppressing further XFOIL exception prints "
+                "for this solver instance."
+            )
+
     def analyze(self, airfoil: Airfoil, point: OperatingPoint) -> PolarPoint:
         per_point: dict[str, tuple[float, float, float] | None] = {}
         for mp in self.mission:
             try:
                 per_point[mp.name] = self.analyze_single(airfoil, mp.alpha, mp.reynolds, mp.mach)
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                self._maybe_print_trace(mp.name, airfoil, exc)
                 per_point[mp.name] = None
         primary = per_point[self.primary_name]
         if primary is None:
-            raise RuntimeError(f"Primary mission point '{self.primary_name}' failed.")
+            # Raising a SolverError (rather than a generic RuntimeError) lets
+            # AirfoilEvaluator.evaluate translate this into sentinel objective
+            # / constraint values so pymoo dominates the candidate instead of
+            # aborting the whole run.
+            raise SolverError(
+                f"XFOIL did not converge at the primary mission point "
+                f"'{self.primary_name}' for airfoil '{airfoil.name}'."
+            )
         cl_total = sum(
             mp.lift_weight * (per_point[mp.name][0] if per_point[mp.name] else 0.0)
             for mp in self.mission
@@ -529,7 +559,7 @@ def build_naca4(params: dict[str, float]) -> Airfoil:
 DESIGN_SPACE = DesignSpace(
     [
         DesignVariable("m", 0.00, 0.95, label=VAR["m"][1]),
-        DesignVariable("p", 0.20, 0.80, label=VAR["p"][1]),
+        DesignVariable("p", 0.10, 0.80, label=VAR["p"][1]),
         DesignVariable("t", 0.01, 0.40, label=VAR["t"][1]),
     ]
 )
@@ -643,6 +673,86 @@ def recommended_index_in_population(snap: Any) -> int | None:
     par_idx = np.where(par)[0]
     knee = knee_point_index(f[par_idx])
     return int(par_idx[knee])
+
+
+def diagnose_history(history: Any, n_geo: int, n_phys: int) -> None:
+    """Print a per-run breakdown of why candidates were rejected.
+
+    The :class:`AirfoilEvaluator` packs every constraint into a single
+    ``g`` vector of length ``n_geo + n_phys``, and uses sentinel values
+    on the ``F`` vector whenever it short-circuits. We can therefore
+    classify each evaluated candidate into one of four buckets:
+
+    * **geom_fail** — at least one geometric ``g`` > 0 (and ``F`` is
+      sentinel because the solver was skipped),
+    * **solver_fail** — geometry was fine but the solver raised, so
+      ``F`` is sentinel and the physical ``g`` slots are sentinel too,
+    * **phys_fail** — solver returned, but at least one physical
+      ``g`` > 0 (CL too low, CD too high, ``|C_m|`` too big),
+    * **feasible** — fully feasible and reported the real objective.
+
+    Walking every generation gives a cumulative count over the run.
+    Useful to immediately see whether the empty-Pareto symptom is
+    driven by an XFOIL setup issue, a too-tight engineering envelope,
+    or a too-tight geometric envelope.
+    """
+    geom_fail = solver_fail = phys_fail = feasible = total = 0
+    best_cl_seen = -np.inf
+    best_cd_seen = np.inf
+    for snap in history.snapshots:
+        f = np.asarray(snap.f, dtype=float)
+        if snap.g is not None:
+            g = np.asarray(snap.g, dtype=float)
+        else:
+            g = np.zeros((f.shape[0], 0), dtype=float)
+        finite_f = np.all(np.abs(f) < _FAIL_THRESHOLD, axis=1)
+        geo_violated = (
+            np.any(g[:, :n_geo] > 1e-9, axis=1)
+            if g.shape[1] >= n_geo and n_geo > 0
+            else np.zeros(f.shape[0], dtype=bool)
+        )
+        phys_violated = (
+            np.any(g[:, n_geo : n_geo + n_phys] > 1e-9, axis=1)
+            if g.shape[1] >= n_geo + n_phys and n_phys > 0
+            else np.zeros(f.shape[0], dtype=bool)
+        )
+        for i in range(f.shape[0]):
+            total += 1
+            if not finite_f[i]:
+                if geo_violated[i]:
+                    geom_fail += 1
+                else:
+                    solver_fail += 1
+            elif phys_violated[i]:
+                phys_fail += 1
+            else:
+                feasible += 1
+        # Track best-seen objectives across feasible candidates.
+        feas_mask = finite_f & ~phys_violated & ~geo_violated
+        if np.any(feas_mask):
+            cl_here = -f[feas_mask, 0]
+            cd_here = f[feas_mask, 1]
+            best_cl_seen = max(best_cl_seen, float(cl_here.max()))
+            best_cd_seen = min(best_cd_seen, float(cd_here.min()))
+
+    pct = lambda n: 100.0 * n / max(total, 1)  # noqa: E731
+    print(
+        f"    ↳ candidates: {total} | "
+        f"feasible: {feasible} ({pct(feasible):.1f}%) | "
+        f"geom-infeasible: {geom_fail} ({pct(geom_fail):.1f}%) | "
+        f"XFOIL-failed: {solver_fail} ({pct(solver_fail):.1f}%) | "
+        f"phys-constraint-violated: {phys_fail} ({pct(phys_fail):.1f}%)"
+    )
+    if feasible > 0:
+        print(
+            f"    ↳ best feasible seen — "
+            f"CL_total = {best_cl_seen:.3f}, CD_primary = {best_cd_seen:.5f}"
+        )
+    else:
+        print(
+            "    ↳ no feasible candidate at all — Pareto front will be empty. "
+            "Inspect the breakdown above to decide what to relax."
+        )
 
 
 # ========================================================================== #
@@ -1161,10 +1271,10 @@ def render_geometry_evolution(
         # Past Pareto geometries
         for j in range(start, i):
             for af in per_gen_pareto[j]:
-                ax.plot(af.x, af.y, color=PALETTE["geom_history"], lw=0.6, alpha=0.4, zorder=1)
+                ax.plot(af.x, af.y, color=PALETTE["geom_history"], lw=0.4, alpha=0.2, zorder=1)
         # Current generation Pareto in amber
         for af in per_gen_pareto[i]:
-            ax.plot(af.x, af.y, color=PALETTE["pareto"], lw=1.7, alpha=0.4, zorder=2)
+            ax.plot(af.x, af.y, color=PALETTE["pareto"], lw=0.5, alpha=0.2, zorder=2)
         # Recommended geometry overlaid in deep navy
         if per_gen_recommended[i] is not None:
             af = per_gen_recommended[i]
@@ -1787,6 +1897,11 @@ def run_one_optimisation(
     )
     print(f"  Optimising {pretty} (pop={pop}, n_gen={n_gen}, seed={seed}) ...")
     study.run()
+    diagnose_history(
+        study.history,
+        n_geo=evaluator.n_geometric_constraints,
+        n_phys=evaluator.n_physical_constraints,
+    )
     # Pick the recommended airfoil from the final generation.
     snap = study.history.snapshots[-1]
     rec_idx = recommended_index_in_population(snap)
@@ -1814,14 +1929,14 @@ def run_one_optimisation(
 def main() -> None:  # noqa: PLR0915
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", type=Path, default=Path("docs/assets"))
-    parser.add_argument("--pop", type=int, default=100)
+    parser.add_argument("--pop", type=int, default=50)
     parser.add_argument("--n-gen", type=int, default=50)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--fps", type=int, default=4)
     parser.add_argument(
         "--fade-window",
         type=int,
-        default=10,
+        default=5,
         help="Number of past generations shown faded in the geometry GIF.",
     )
     parser.add_argument(
