@@ -5490,7 +5490,8 @@ round(airfoil.max_thickness, 3)
 <span class="normal">172</span>
 <span class="normal">173</span>
 <span class="normal">174</span>
-<span class="normal">175</span></pre></div></td><td class="code"><div><pre><span></span><code><span class="k">class</span><span class="w"> </span><span class="nc">NACA4Generator</span><span class="p">(</span><span class="n">AirfoilGenerator</span><span class="p">):</span>
+<span class="normal">175</span>
+<span class="normal">176</span></pre></div></td><td class="code"><div><pre><span></span><code><span class="k">class</span><span class="w"> </span><span class="nc">NACA4Generator</span><span class="p">(</span><span class="n">AirfoilGenerator</span><span class="p">):</span>
 <span class="w">    </span><span class="sd">&quot;&quot;&quot;Generate a NACA 4-digit airfoil from its designation.</span>
 
 <span class="sd">    Args:</span>
@@ -5599,11 +5600,12 @@ round(airfoil.max_thickness, 3)
 <span class="sd">            The half-thickness at each station.</span>
 <span class="sd">        &quot;&quot;&quot;</span>
         <span class="n">a4</span> <span class="o">=</span> <span class="n">_A4_CLOSED</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">trailing_edge</span> <span class="ow">is</span> <span class="n">TrailingEdge</span><span class="o">.</span><span class="n">CLOSED</span> <span class="k">else</span> <span class="n">_A4_OPEN</span>
-        <span class="k">return</span> <span class="p">(</span>
+        <span class="n">yt</span> <span class="o">=</span> <span class="p">(</span>
             <span class="mf">5.0</span>
             <span class="o">*</span> <span class="bp">self</span><span class="o">.</span><span class="n">_thickness</span>
             <span class="o">*</span> <span class="p">(</span><span class="n">_A0</span> <span class="o">*</span> <span class="n">np</span><span class="o">.</span><span class="n">sqrt</span><span class="p">(</span><span class="n">xc</span><span class="p">)</span> <span class="o">+</span> <span class="n">_A1</span> <span class="o">*</span> <span class="n">xc</span> <span class="o">+</span> <span class="n">_A2</span> <span class="o">*</span> <span class="n">xc</span><span class="o">**</span><span class="mi">2</span> <span class="o">+</span> <span class="n">_A3</span> <span class="o">*</span> <span class="n">xc</span><span class="o">**</span><span class="mi">3</span> <span class="o">+</span> <span class="n">a4</span> <span class="o">*</span> <span class="n">xc</span><span class="o">**</span><span class="mi">4</span><span class="p">)</span>
         <span class="p">)</span>
+        <span class="k">return</span> <span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">yt</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">float64</span><span class="p">)</span>
 
     <span class="k">def</span><span class="w"> </span><span class="nf">_camber_line</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">xc</span><span class="p">:</span> <span class="n">FloatArray</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">tuple</span><span class="p">[</span><span class="n">FloatArray</span><span class="p">,</span> <span class="n">FloatArray</span><span class="p">]:</span>
 <span class="w">        </span><span class="sd">&quot;&quot;&quot;Compute the camber line ``yc(x)`` and its slope ``dyc/dx``.</span>
