@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-05
+
+### Added
+- Surface-distribution gallery in `examples/04_full_pipeline.py`:
+  per-run GIFs and final PNGs for **Cp, Cf, H, δ*, θ, and Ue/Vinf** at
+  every mission point of every stage, plus stage-3 cross-comparison
+  figures overlaying each champion's distribution at each leg. The
+  renderer factory is descriptor-driven (`WallQuantity` dataclass +
+  `WALL_QUANTITIES` tuple), so adding or removing a quantity is a
+  one-line change.
+- New library entry point
+  `XfoilRunner.analyze_with_dumps(airfoil, point)` returns
+  `(PolarPoint, CpDistribution | None, WallProfile | None)`. The
+  existing `analyze` API is unchanged.
+- `XfoilCommand.dump_bl(path)` emits the OPER `DUMP` command for
+  boundary-layer profiles.
+- `XfoilOutputParser.parse_bl_dump(path, point)` parses the standard
+  XFOIL DUMP file (`s x y Ue/Vinf Dstar Theta Cf H`).
+- `WallProfile` dataclass exposing all eight DUMP columns, panel-order.
+- `XfoilSession.to_command_script` now accepts optional `cp_path` and
+  `bl_path` kwargs to opt into surface dumps.
+- Best-effort post-mortem diagnostics on `XfoilRunner`:
+  `last_transcript`, `last_stdout`, `last_stderr`, `last_workdir_files`,
+  and `last_files` are populated after every analyze call so callers
+  can inspect what XFOIL actually wrote without rerunning.
+
+### Fixed
+- `XfoilOutputParser.parse_cp` is now tolerant of both 2-column
+  (`x Cp`) and 3-column (`x y Cp`) CPWR output variants, and silently
+  skips non-numeric lines instead of raising. Some XFOIL builds emit
+  header rows that defeated the strict parser.
+- `XfoilRunner._run_in` falls back to XFOIL's default dump filenames
+  (`<basename>.cp` / `<basename>.bl`) when the explicitly requested
+  filename does not materialise, so the Cp / BL dumps are picked up
+  regardless of the build's filename quirks.
+- `XfoilSession.to_command_script` emits `CPWR` + `DUMP` **before**
+  closing the polar accumulator. Some XFOIL builds short-circuit
+  those commands when issued after a `PACC` close.
+
 ## [0.2.1] — 2026-05
 
 ### Fixed
@@ -158,7 +197,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   repo layout, module map, design patterns, public ABCs, roadmap,
   dependencies, testing/visualization/Git strategies.
 
-[Unreleased]: https://github.com/vcaries/airfoil_optimization/compare/v0.2.1...main
+[Unreleased]: https://github.com/vcaries/airfoil_optimization/compare/v0.3.0...main
+[0.3.0]: https://github.com/vcaries/airfoil_optimization/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/vcaries/airfoil_optimization/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/vcaries/airfoil_optimization/compare/v0.1.0-M1...v0.2.0
 [0.1.0-M1]: https://github.com/vcaries/airfoil_optimization/releases/tag/v0.1.0-M1
