@@ -27,7 +27,7 @@ from aeroforge.solver.xfoil.session import XfoilSession
 
 if TYPE_CHECKING:
     from aeroforge.geometry.airfoil import Airfoil
-    from aeroforge.solver.xfoil.results import PolarPoint
+    from aeroforge.solver.xfoil.results import CpDistribution, PolarPoint, WallProfile
 
 PathLike = str | Path
 _log = get_logger(__name__)
@@ -81,6 +81,22 @@ class XfoilRunner(AbstractSolver):
         self.max_iter = int(max_iter)
         self.n_crit = float(n_crit)
         self.repanel = bool(repanel)
+        # Diagnostic attributes — populated by every ``_run_in`` so callers
+        # can inspect the actual transcript + XFOIL stdout/stderr without
+        # re-running. Useful for debugging silent dump failures (e.g. CPWR
+        # not producing its output file on some XFOIL builds).
+        self.last_transcript: str = ""
+        self.last_stdout: bytes = b""
+        self.last_stderr: bytes = b""
+        # Snapshot of the scratch workdir contents right after the XFOIL
+        # process exits. Lets the caller see exactly which output files
+        # the binary materialised — essential when a dump is missing.
+        self.last_workdir_files: list[str] = []
+        # Snapshot of the actual file contents (bytes). The workdir is a
+        # tempfile.TemporaryDirectory and is wiped as soon as ``_run_in``
+        # returns, so without this snapshot the diagnostic layer has no
+        # way to look at what XFOIL really wrote.
+        self.last_files: dict[str, bytes] = {}
 
     # ------------------------------------------------------------------ #
     # Public API
@@ -102,32 +118,91 @@ class XfoilRunner(AbstractSolver):
             XfoilNotFoundError: If the binary disappeared between construction
                 and the call.
         """
+        polar, _, _ = self._run_with(airfoil, point, want_cp=False, want_bl=False)
+        return polar
+
+    def analyze_with_dumps(
+        self, airfoil: Airfoil, point: OperatingPoint
+    ) -> tuple[PolarPoint, CpDistribution | None, WallProfile | None]:
+        """Like :meth:`analyze`, but also asks XFOIL to dump Cp and BL data.
+
+        The integrated polar (CL, CD, CM, transition) is returned as before.
+        In addition, XFOIL's ``CPWR`` and ``DUMP`` commands are appended to
+        the command transcript so we capture the surface Cp distribution
+        and the boundary-layer profile (Cf, H, delta*, theta, Ue/Vinf).
+
+        If a dump fails to materialise (for instance because the XFOIL build
+        does not support ``DUMP`` at the top level), the corresponding entry
+        is returned as ``None`` rather than raising.
+
+        Args:
+            airfoil: Geometry to load.
+            point: Aerodynamic operating point to evaluate.
+
+        Returns:
+            ``(polar, cp, wall)`` where ``cp`` and ``wall`` may be ``None``.
+
+        Raises:
+            ConvergenceError: If XFOIL did not converge the requested alpha.
+            XfoilExecutionError: For process-level failures.
+            XfoilNotFoundError: If the binary disappeared between construction
+                and the call.
+        """
+        return self._run_with(airfoil, point, want_cp=True, want_bl=True)
+
+    def _run_with(
+        self,
+        airfoil: Airfoil,
+        point: OperatingPoint,
+        *,
+        want_cp: bool,
+        want_bl: bool,
+    ) -> tuple[PolarPoint, CpDistribution | None, WallProfile | None]:
+        """Common driver shared by :meth:`analyze` and :meth:`analyze_with_dumps`."""
         if self.work_dir is None:
             with tempfile.TemporaryDirectory(prefix="aeroforge-xfoil-") as tmp:
-                return self._run_in(Path(tmp), airfoil, point)
+                return self._run_in(Path(tmp), airfoil, point, want_cp=want_cp, want_bl=want_bl)
         self.work_dir.mkdir(parents=True, exist_ok=True)
-        return self._run_in(self.work_dir, airfoil, point)
+        return self._run_in(self.work_dir, airfoil, point, want_cp=want_cp, want_bl=want_bl)
 
     # ------------------------------------------------------------------ #
     # Internals
     # ------------------------------------------------------------------ #
-    def _run_in(self, workdir: Path, airfoil: Airfoil, point: OperatingPoint) -> PolarPoint:
+    def _run_in(
+        self,
+        workdir: Path,
+        airfoil: Airfoil,
+        point: OperatingPoint,
+        *,
+        want_cp: bool = False,
+        want_bl: bool = False,
+    ) -> tuple[PolarPoint, CpDistribution | None, WallProfile | None]:
         """Execute a single XFOIL invocation inside ``workdir`` and parse it.
 
         Args:
             workdir: Scratch directory used for the run.
             airfoil: Geometry to load.
             point: Aerodynamic operating point.
+            want_cp: If True, also dump the Cp distribution via ``CPWR``.
+            want_bl: If True, also dump the BL state via ``DUMP``.
 
         Returns:
-            The matching :class:`PolarPoint`.
+            ``(polar, cp, wall)``. ``cp`` and ``wall`` are ``None`` when the
+            corresponding ``want_*`` flag is False or when XFOIL failed to
+            materialise that dump (rare; treated as a soft failure so the
+            caller still gets the polar).
         """
         dat_path = workdir / "airfoil.dat"
         polar_path = workdir / "polar.pol"
+        cp_path = workdir / "cp.dat" if want_cp else None
+        bl_path = workdir / "bl.dat" if want_bl else None
         airfoil.to_dat(dat_path)
         # XFOIL refuses to overwrite an existing PACC file; clear it first.
         if polar_path.exists():
             polar_path.unlink()
+        for p in (cp_path, bl_path):
+            if p is not None and p.exists():
+                p.unlink()
 
         session = XfoilSession(
             airfoil=airfoil,
@@ -144,7 +219,10 @@ class XfoilRunner(AbstractSolver):
         transcript = session.to_command_script(
             dat_path=dat_path.name,
             polar_path=polar_path.name,
+            cp_path=cp_path.name if cp_path is not None else None,
+            bl_path=bl_path.name if bl_path is not None else None,
         )
+        self.last_transcript = transcript
 
         _log.debug(
             "Invoking XFOIL: alpha=%.3f Re=%.3e Mach=%.3f iter=%d ncrit=%.1f",
@@ -211,6 +289,26 @@ class XfoilRunner(AbstractSolver):
                 f"Failed to launch XFOIL binary {self.binary!r}: {exc}"
             ) from exc
 
+        # Stash for post-mortem inspection by callers (e.g. wall-dump
+        # diagnostics in the visualisation layer).
+        self.last_stdout = proc.stdout if isinstance(proc.stdout, bytes) else b""
+        self.last_stderr = proc.stderr if isinstance(proc.stderr, bytes) else b""
+        try:
+            self.last_workdir_files = sorted(p.name for p in workdir.iterdir())
+            self.last_files = {}
+            for p in workdir.iterdir():
+                if not p.is_file():
+                    continue
+                try:
+                    # Cap to ~256 kB per file to avoid blowing memory on
+                    # something unusually big — Cp / BL dumps are < 50 kB.
+                    self.last_files[p.name] = p.read_bytes()[:262144]
+                except OSError:
+                    self.last_files[p.name] = b""
+        except OSError:
+            self.last_workdir_files = []
+            self.last_files = {}
+
         def _decode(buf: bytes | str | None) -> str:
             # Robust against monkeypatched ``subprocess.run`` fakes that may
             # still hand us ``str`` instead of ``bytes`` in tests.
@@ -246,12 +344,57 @@ class XfoilRunner(AbstractSolver):
             )
 
         polar = XfoilOutputParser.parse_polar(polar_path)
+        matched: PolarPoint | None = None
         for pt in polar.points:
             if abs(pt.operating_point.alpha - point.alpha) <= _ALPHA_MATCH_TOL:
-                return pt
+                matched = pt
+                break
 
-        raise ConvergenceError(
-            f"XFOIL did not converge at alpha={point.alpha:.3f} deg "
-            f"(parsed {len(polar.points)} other rows).",
-            alpha=point.alpha,
-        )
+        if matched is None:
+            raise ConvergenceError(
+                f"XFOIL did not converge at alpha={point.alpha:.3f} deg "
+                f"(parsed {len(polar.points)} other rows).",
+                alpha=point.alpha,
+            )
+
+        # Best-effort dump parsing. XFOIL doesn't always honour the
+        # filename we hand to CPWR / DUMP — depending on the build, it can
+        # fall back to a default derived from the loaded dat file
+        # basename (``airfoil.cp`` / ``airfoil.bl`` in our case). To stay
+        # robust we look for the file under both our explicit name and
+        # any plausible XFOIL default, picking whichever the binary
+        # actually produced. We never fail the call because of a missing
+        # dump; the caller detects ``None`` and skips that plot.
+        def _locate(
+            requested: Path | None, default_basenames: tuple[str, ...], glob_pattern: str
+        ) -> Path | None:
+            if requested is None:
+                return None
+            if requested.exists():
+                return requested
+            for name in default_basenames:
+                candidate = workdir / name
+                if candidate.exists():
+                    return candidate
+            # Last resort — pick the first matching file XFOIL left behind.
+            for candidate in workdir.glob(glob_pattern):
+                return candidate
+            return None
+
+        cp_result: CpDistribution | None = None
+        cp_actual = _locate(cp_path, ("airfoil.cp",), "*.cp")
+        if cp_actual is not None:
+            try:
+                cp_result = XfoilOutputParser.parse_cp(cp_actual, point)
+            except Exception as exc:  # noqa: BLE001
+                _log.debug("Failed to parse Cp dump %s: %s", cp_actual, exc)
+
+        wall_result: WallProfile | None = None
+        bl_actual = _locate(bl_path, ("airfoil.bl",), "*.bl")
+        if bl_actual is not None:
+            try:
+                wall_result = XfoilOutputParser.parse_bl_dump(bl_actual, point)
+            except Exception as exc:  # noqa: BLE001
+                _log.debug("Failed to parse BL dump %s: %s", bl_actual, exc)
+
+        return matched, cp_result, wall_result

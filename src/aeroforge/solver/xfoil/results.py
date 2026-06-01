@@ -57,6 +57,39 @@ class CpDistribution:
     cp: FloatArray
 
 
+@dataclass(frozen=True, slots=True)
+class WallProfile:
+    """Boundary-layer surface distributions from XFOIL's ``DUMP`` command.
+
+    The eight columns mirror XFOIL's ``DUMP`` output format
+    (``s x y Ue/Vinf Dstar Theta Cf H``). Points are in panel order:
+    starting near the trailing edge on the upper surface, going forward to
+    the leading edge, then aft along the lower surface back to the trailing
+    edge.
+
+    Attributes:
+        operating_point: The operating point this profile was sampled at.
+        s: Arclength along the surface.
+        x: Chordwise position.
+        y: Vertical position.
+        ue_vinf: Edge velocity normalised by the freestream velocity.
+        delta_star: Displacement thickness.
+        theta: Momentum thickness.
+        cf: Skin-friction coefficient.
+        h: Boundary-layer shape factor (``delta_star / theta``).
+    """
+
+    operating_point: OperatingPoint
+    s: FloatArray
+    x: FloatArray
+    y: FloatArray
+    ue_vinf: FloatArray
+    delta_star: FloatArray
+    theta: FloatArray
+    cf: FloatArray
+    h: FloatArray
+
+
 @dataclass(slots=True)
 class Polar:
     """A sweep of :class:`PolarPoint` instances at a fixed Reynolds/Mach.

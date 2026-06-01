@@ -96,6 +96,16 @@ class XfoilCommand:
         self._lines += ["CPWR", path]
         return self
 
+    def dump_bl(self, path: str) -> XfoilCommand:
+        """Write the current boundary-layer state to ``path``.
+
+        Issued from the OPER menu after a converged viscous solve. The
+        resulting file has columns ``s x y Ue/Vinf Dstar Theta Cf H``,
+        which is the standard XFOIL BL output format.
+        """
+        self._lines += ["DUMP", path]
+        return self
+
     def polar_accumulate(self, path: str) -> XfoilCommand:
         """Open a polar-accumulation file at ``path``."""
         self._lines += ["PACC", path, ""]
