@@ -98,7 +98,7 @@ from aeroforge.optimization import (
 )
 from aeroforge.optimization.algorithms import nsga2
 from aeroforge.solver.base import AbstractSolver
-from aeroforge.solver.xfoil.results import PolarPoint
+from aeroforge.solver.xfoil.results import CpDistribution, PolarPoint, WallProfile
 from aeroforge.visualization.pareto import non_dominated_mask
 
 
@@ -303,7 +303,7 @@ class AggregatedXfoilSolver(AbstractSolver):
     x_trip_lower: float | None = None
     # Debug helpers — print the first N XFOIL exceptions verbatim so we can
     # see what's really happening when the failure rate looks suspicious.
-    debug_max_traces: int = 10
+    debug_max_traces: int = 3
     _traces_printed: int = field(default=0, init=False, repr=False)
 
     def _runner(self) -> Any:
@@ -395,6 +395,67 @@ def per_point_analysis(
         except Exception:  # noqa: BLE001
             out[mp.name] = (float("nan"), float("nan"), float("nan"))
     return out
+
+
+_CP_DEBUG_EMITTED = False  # module-level latch so the diagnostic prints once
+
+
+def dump_wall_state(
+    solver: AbstractSolver, airfoil: Airfoil, mp: MissionPoint
+) -> tuple[CpDistribution | None, WallProfile | None]:
+    """Best-effort dump of Cp + BL data for ``airfoil`` at ``mp``.
+
+    Routes to :meth:`XfoilRunner.analyze_with_dumps` when the underlying
+    solver is real XFOIL. Returns ``(None, None)`` for the synthetic
+    fallback or when XFOIL fails (silently — the caller skips the plot).
+
+    If a wall-dump returns BL data but no Cp (the symptom of a silently
+    skipped ``CPWR`` command), the very first occurrence prints the
+    XFOIL transcript + stdout tail. That's enough to see whether
+    ``CPWR`` was rejected by the binary or wrote to an unexpected path.
+    """
+    global _CP_DEBUG_EMITTED
+
+    if not isinstance(solver, AggregatedXfoilSolver):
+        return None, None
+    from aeroforge.solver import XfoilRunner
+
+    runner = XfoilRunner(
+        solver.binary,
+        max_iter=solver.max_iter,
+        n_crit=solver.n_crit,
+        repanel=solver.repanel,
+        timeout_s=solver.timeout_s,
+    )
+    op = OperatingPoint(
+        alpha=mp.alpha,
+        reynolds=mp.reynolds,
+        mach=mp.mach,
+        n_crit=solver.n_crit,
+        x_trip_upper=solver.x_trip_upper,
+        x_trip_lower=solver.x_trip_lower,
+    )
+    try:
+        _polar, cp, wall = runner.analyze_with_dumps(airfoil, op)
+    except Exception:  # noqa: BLE001
+        return None, None
+
+    if cp is None and wall is not None and not _CP_DEBUG_EMITTED:
+        _CP_DEBUG_EMITTED = True
+        print(f"  [cp-debug] XFOIL produced BL data but no Cp for {airfoil.name} @ {mp.name}.")
+        print(f"  [cp-debug] Files in workdir after XFOIL exited: {runner.last_workdir_files}")
+        for name in ("cp.dat", "airfoil.cp"):
+            content = runner.last_files.get(name)
+            if content is None:
+                continue
+            text = content.decode("utf-8", errors="replace")
+            n_lines = text.count("\n") + 1
+            print(f"  [cp-debug] First 20 lines of {name} ({len(content)} bytes, {n_lines} lines):")
+            for line in text.splitlines()[:20]:
+                print(f"    {line!r}")
+        print("  [cp-debug] (further occurrences will be silent)")
+
+    return cp, wall
 
 
 # ========================================================================== #
@@ -1109,6 +1170,143 @@ def draw_parallel(
 
 
 # ========================================================================== #
+# 11b. WALL-QUANTITY MACHINERY — Cp, Cf, H, delta*, theta, Ue/Vinf
+# ========================================================================== #
+@dataclass(frozen=True, slots=True)
+class WallQuantity:
+    """Render descriptor for one surface distribution.
+
+    Attributes:
+        key: Short filename-safe identifier.
+        symbol: Math label used on the y-axis (e.g. ``r"$C_p$"``).
+        description: Long description used in titles.
+        source: ``"cp"`` reads from :class:`CpDistribution`,
+            ``"wall"`` from :class:`WallProfile`.
+        attr: Attribute name on the source dataclass holding the values.
+        invert_y: If True, the y-axis is plotted with positive values down
+            — the standard convention for Cp.
+        symlog: If True, draw with a symlog y-axis (used for Cf which can
+            change sign at separation).
+    """
+
+    key: str
+    symbol: str
+    description: str
+    source: str
+    attr: str
+    invert_y: bool = False
+    symlog: bool = False
+
+
+# Six XFOIL-accessible surface quantities. Adding or removing entries here
+# is the only change needed to extend the wall-asset gallery.
+WALL_QUANTITIES: tuple[WallQuantity, ...] = (
+    WallQuantity(
+        key="cp",
+        symbol=r"$C_p$",
+        description="Pressure coefficient",
+        source="cp",
+        attr="cp",
+        invert_y=True,
+    ),
+    WallQuantity(
+        key="cf",
+        symbol=r"$C_f$",
+        description="Skin-friction coefficient",
+        source="wall",
+        attr="cf",
+        symlog=True,
+    ),
+    WallQuantity(
+        key="h_shape",
+        symbol=r"$H$",
+        description="Boundary-layer shape factor",
+        source="wall",
+        attr="h",
+    ),
+    WallQuantity(
+        key="delta_star",
+        symbol=r"$\delta^{*}/c$",
+        description="Displacement thickness",
+        source="wall",
+        attr="delta_star",
+    ),
+    WallQuantity(
+        key="theta",
+        symbol=r"$\theta/c$",
+        description="Momentum thickness",
+        source="wall",
+        attr="theta",
+    ),
+    WallQuantity(
+        key="ue_vinf",
+        symbol=r"$U_{e}/U_{\infty}$",
+        description="Edge velocity",
+        source="wall",
+        attr="ue_vinf",
+    ),
+)
+
+
+def _split_surfaces(
+    x: np.ndarray, values: np.ndarray
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Split panel-order arrays into upper- and lower-surface segments.
+
+    XFOIL writes points starting near the trailing edge of the upper
+    surface, going forward over the upper surface to the leading edge,
+    then aft along the lower surface back to the trailing edge. The
+    BL ``DUMP`` adds wake panels at the end with ``x > 1``; we drop those
+    so the BL plots stay on the airfoil. We then split at ``argmin(x)``
+    (the LE node) and reorder each surface from LE to TE.
+
+    Returns ``(x_upper, v_upper, x_lower, v_lower)`` with the leading-edge
+    node shared between the two segments.
+    """
+    if x.size == 0:
+        empty = np.empty(0, dtype=float)
+        return empty, empty, empty, empty
+    # Drop wake points (anything past the trailing edge).
+    on_airfoil = x <= 1.0001
+    x_a = x[on_airfoil]
+    v_a = values[on_airfoil]
+    if x_a.size == 0:
+        empty = np.empty(0, dtype=float)
+        return empty, empty, empty, empty
+    le_idx = int(np.argmin(x_a))
+    x_upper = x_a[: le_idx + 1][::-1]
+    v_upper = v_a[: le_idx + 1][::-1]
+    x_lower = x_a[le_idx:]
+    v_lower = v_a[le_idx:]
+    return x_upper, v_upper, x_lower, v_lower
+
+
+def _wall_values(
+    quantity: WallQuantity, cp: CpDistribution | None, wall: WallProfile | None
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """Return ``(x, values)`` for ``quantity`` if available, else ``None``."""
+    if quantity.source == "cp":
+        if cp is None:
+            return None
+        return np.asarray(cp.x, dtype=float), np.asarray(cp.cp, dtype=float)
+    if wall is None:
+        return None
+    return np.asarray(wall.x, dtype=float), np.asarray(getattr(wall, quantity.attr), dtype=float)
+
+
+def _yaxis_bounds(values_list: list[np.ndarray], pad: float = 0.06) -> tuple[float, float]:
+    """Compute padded y-axis bounds over all arrays in ``values_list``."""
+    finite_arrays = [v[np.isfinite(v)] for v in values_list if v.size]
+    finite_arrays = [v for v in finite_arrays if v.size]
+    if not finite_arrays:
+        return 0.0, 1.0
+    stack = np.concatenate(finite_arrays)
+    lo, hi = float(stack.min()), float(stack.max())
+    margin = pad * (hi - lo + 1e-12)
+    return lo - margin, hi + margin
+
+
+# ========================================================================== #
 # 12. PER-RUN RENDERERS (asset gallery for ONE optimisation)
 # ========================================================================== #
 def render_pareto_evolution(
@@ -1271,14 +1469,14 @@ def render_geometry_evolution(
         # Past Pareto geometries
         for j in range(start, i):
             for af in per_gen_pareto[j]:
-                ax.plot(af.x, af.y, color=PALETTE["geom_history"], lw=0.4, alpha=0.2, zorder=1)
+                ax.plot(af.x, af.y, color=PALETTE["geom_history"], lw=0.4, alpha=0.5, zorder=1)
         # Current generation Pareto in amber
         for af in per_gen_pareto[i]:
-            ax.plot(af.x, af.y, color=PALETTE["pareto"], lw=0.5, alpha=0.2, zorder=2)
+            ax.plot(af.x, af.y, color=PALETTE["pareto"], lw=0.5, alpha=0.5, zorder=2)
         # Recommended geometry overlaid in deep navy
         if per_gen_recommended[i] is not None:
             af = per_gen_recommended[i]
-            ax.plot(af.x, af.y, color=PALETTE["recommended"], lw=2.4, alpha=1.0, zorder=3)
+            ax.plot(af.x, af.y, color=PALETTE["recommended"], lw=1.5, alpha=1.0, zorder=3)
             ax.text(
                 0.99,
                 0.97,
@@ -1592,6 +1790,186 @@ def render_pareto_geometries(
     plt.close(fig)
 
 
+def render_wall_quantity_evolution(
+    history: Any,
+    evaluator: AirfoilEvaluator,
+    solver: AbstractSolver,
+    mp: MissionPoint,
+    quantity: WallQuantity,
+    out_gif: Path,
+    out_png: Path,
+    fps: int,
+    fade_window: int,
+) -> bool:
+    """Animate the recommended airfoil's wall ``quantity`` across generations.
+
+    Re-runs XFOIL once per generation on the recommended design (cheap
+    relative to the GA itself) plus once per Pareto airfoil in the final
+    generation for the static PNG overlay. Returns True if the asset was
+    written, False if no data was collectable (synthetic solver, or every
+    XFOIL re-evaluation failed).
+    """
+    # --- 1. Re-run XFOIL on the recommended design at each generation ---
+    per_gen_pairs: list[tuple[np.ndarray, np.ndarray] | None] = []
+    rec_names: list[str | None] = []
+    for snap in history.snapshots:
+        rec_idx = recommended_index_in_population(snap)
+        if rec_idx is None:
+            per_gen_pairs.append(None)
+            rec_names.append(None)
+            continue
+        try:
+            airfoil = evaluator.genome_to_airfoil(np.asarray(snap.x, dtype=float)[rec_idx])
+        except Exception:  # noqa: BLE001
+            per_gen_pairs.append(None)
+            rec_names.append(None)
+            continue
+        cp, wall = dump_wall_state(solver, airfoil, mp)
+        pair = _wall_values(quantity, cp, wall)
+        per_gen_pairs.append(pair)
+        rec_names.append(airfoil.name if pair is not None else None)
+
+    if not any(p is not None for p in per_gen_pairs):
+        return False
+
+    # --- 2. Re-run XFOIL on the FINAL Pareto designs (for the PNG overlay) ---
+    last = history.snapshots[-1]
+    _, par, _ = classify(last)
+    pareto_pairs: list[tuple[np.ndarray, np.ndarray]] = []
+    if np.any(par):
+        x_last = np.asarray(last.x, dtype=float)
+        for idx in np.where(par)[0]:
+            try:
+                af = evaluator.genome_to_airfoil(x_last[idx])
+            except Exception:  # noqa: BLE001
+                continue
+            cp, wall = dump_wall_state(solver, af, mp)
+            pair = _wall_values(quantity, cp, wall)
+            if pair is not None:
+                pareto_pairs.append(pair)
+
+    # --- 3. Compute shared y-axis bounds over everything we collected ---
+    all_values = [v for p in per_gen_pairs if p is not None for v in (p[1],)]
+    all_values += [v for _, v in pareto_pairs]
+    y_lo, y_hi = _yaxis_bounds(all_values, pad=0.08)
+
+    figsize = (9.2, 4.8)
+
+    def style_axes(ax_: Any, gen_index: int, total: int) -> None:
+        ax_.set_xlim(-0.02, 1.02)
+        ax_.set_ylim(y_lo, y_hi)
+        if quantity.invert_y:
+            ax_.invert_yaxis()
+        if quantity.symlog:
+            ax_.set_yscale("symlog", linthresh=1.0e-3)
+        ax_.set_xlabel(r"$x/c$  (Chordwise position)")
+        ax_.set_ylabel(f"{quantity.symbol}  ({quantity.description})")
+        ax_.set_title(
+            f"{quantity.description} — Generation {gen_index + 1} of {total} "
+            f"@ {mp.pretty} (α = {mp.alpha:.1f}°)"
+        )
+
+    def draw_curve(
+        ax_: Any,
+        pair: tuple[np.ndarray, np.ndarray],
+        color: str,
+        lw: float,
+        alpha: float,
+        zorder: int = 2,
+    ) -> None:
+        x_arr, v_arr = pair
+        xu, vu, xl, vl = _split_surfaces(x_arr, v_arr)
+        if xu.size:
+            ax_.plot(xu, vu, color=color, lw=lw, alpha=alpha, zorder=zorder)
+        if xl.size:
+            ax_.plot(xl, vl, color=color, lw=lw, alpha=alpha, zorder=zorder, ls="--")
+
+    # --- 4. Build GIF frames ---
+    frames: list[np.ndarray] = []
+    for i, pair in enumerate(per_gen_pairs):
+        fig, ax = plt.subplots(figsize=figsize)
+        # Faded recent past
+        start = max(0, i - fade_window)
+        for j in range(start, i):
+            if per_gen_pairs[j] is not None:
+                draw_curve(
+                    ax, per_gen_pairs[j], PALETTE["geom_history"], lw=0.7, alpha=0.4, zorder=1
+                )
+        # Current recommended
+        if pair is not None:
+            draw_curve(ax, pair, PALETTE["recommended"], lw=2.4, alpha=1.0, zorder=3)
+            ax.text(
+                0.99,
+                0.97 if not quantity.invert_y else 0.05,
+                f"Recommended: {rec_names[i]}",
+                transform=ax.transAxes,
+                ha="right",
+                va="top" if not quantity.invert_y else "bottom",
+                fontsize=10.0,
+                color=PALETTE["recommended"],
+                bbox={"facecolor": "white", "edgecolor": "0.7", "pad": 2.5, "alpha": 0.92},
+            )
+        style_axes(ax, i, len(per_gen_pairs))
+        # 3-entry legend: solid = upper surface, dashed = lower, faded = past gens
+        legend_handles = [
+            Line2D([0], [0], color=PALETTE["recommended"], lw=2.4, label="Upper surface"),
+            Line2D(
+                [0],
+                [0],
+                color=PALETTE["recommended"],
+                lw=2.4,
+                ls="--",
+                label="Lower surface",
+            ),
+            Line2D(
+                [0],
+                [0],
+                color=PALETTE["geom_history"],
+                lw=0.8,
+                label=f"Past {fade_window} generations",
+            ),
+        ]
+        ax.legend(handles=legend_handles, loc="best", fontsize=9.0)
+        fig.subplots_adjust(left=0.10, right=0.98, top=0.9, bottom=0.13)
+        frames.append(_fig_to_rgb(fig))
+
+    _save_gif(frames, out_gif, fps)
+
+    # --- 5. Final PNG with Pareto overlay ---
+    fig, ax = plt.subplots(figsize=figsize)
+    for pair in pareto_pairs:
+        draw_curve(ax, pair, PALETTE["pareto"], lw=1.2, alpha=0.55, zorder=2)
+    last_rec = per_gen_pairs[-1]
+    if last_rec is not None:
+        draw_curve(ax, last_rec, PALETTE["recommended"], lw=2.6, alpha=1.0, zorder=4)
+    style_axes(ax, len(per_gen_pairs) - 1, len(per_gen_pairs))
+    ax.set_title(
+        f"Final state — {quantity.description} @ {mp.pretty} "
+        f"(α = {mp.alpha:.1f}°, Re = {mp.reynolds:.0e}, M = {mp.mach:.2f})"
+    )
+    legend_handles = [
+        Line2D([0], [0], color=PALETTE["pareto"], lw=1.2, label="Final Pareto — upper surface"),
+        Line2D(
+            [0],
+            [0],
+            color=PALETTE["pareto"],
+            lw=1.2,
+            ls="--",
+            label="Final Pareto — lower surface",
+        ),
+        Line2D([0], [0], color=PALETTE["recommended"], lw=2.6, label="Recommended (upper)"),
+        Line2D(
+            [0], [0], color=PALETTE["recommended"], lw=2.6, ls="--", label="Recommended (lower)"
+        ),
+    ]
+    ax.legend(handles=legend_handles, loc="best", fontsize=9.0)
+    fig.subplots_adjust(left=0.10, right=0.98, top=0.9, bottom=0.13)
+    out_png.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_png, dpi=180)
+    plt.close(fig)
+    return True
+
+
 # ========================================================================== #
 # 13. ONE FULL PER-RUN ASSET GENERATION
 # ========================================================================== #
@@ -1664,6 +2042,28 @@ def render_full_asset_set(
         out_dir / "multipoint_polars.png",
         MISSION,
     )
+    # Wall-quantity gallery — one (gif, png) pair per (quantity, mission point).
+    # Stage 1 runs only dump for their single mission point; stage 2 (multi)
+    # dumps for every leg so the user gets a full picture.
+    wall_dir = out_dir / "wall_quantities"
+    for mp in run.mission:
+        for quantity in WALL_QUANTITIES:
+            stem = wall_dir / f"{quantity.key}__{mp.name}"
+            ok = render_wall_quantity_evolution(
+                history=run.history,
+                evaluator=run.evaluator,
+                solver=run.solver,
+                mp=mp,
+                quantity=quantity,
+                out_gif=stem.with_suffix(".gif"),
+                out_png=stem.parent / f"{stem.name}_final.png",
+                fps=fps,
+                fade_window=fade_window,
+            )
+            if not ok:
+                # Synthetic solver or every XFOIL re-eval failed for this
+                # (quantity, mp). Don't spam the console — silent skip is fine.
+                continue
 
 
 # ========================================================================== #
@@ -1832,6 +2232,88 @@ def render_comparison_pareto_overlay(runs: list[RunResult], out_png: Path) -> No
     plt.close(fig)
 
 
+def render_comparison_wall_quantity(
+    runs: list[RunResult],
+    quantity: WallQuantity,
+    mission: tuple[MissionPoint, ...],
+    out_png: Path,
+) -> bool:
+    """Overlay every run's *champion* ``quantity`` at every mission leg.
+
+    Produces a figure with one panel per mission point. Each panel shows
+    the recommended-airfoil distribution of ``quantity`` from each run.
+    Returns False if no run yielded data (e.g. all synthetic).
+    """
+    n_cols = len(mission)
+    fig, axes = plt.subplots(1, n_cols, figsize=(4.3 * n_cols + 0.3, 4.4), squeeze=False)
+    colors = PALETTE["mission"]
+
+    any_data = False
+    all_values: list[np.ndarray] = []
+    pairs_per_panel: list[list[tuple[str, str, tuple[np.ndarray, np.ndarray]]]] = [
+        [] for _ in mission
+    ]
+    for j, mp in enumerate(mission):
+        for i, run in enumerate(runs):
+            if run.recommended_airfoil is None:
+                continue
+            cp, wall = dump_wall_state(run.solver, run.recommended_airfoil, mp)
+            pair = _wall_values(quantity, cp, wall)
+            if pair is None:
+                continue
+            color = colors[i % len(colors)]
+            pairs_per_panel[j].append((run.pretty, color, pair))
+            all_values.append(pair[1])
+            any_data = True
+
+    if not any_data:
+        plt.close(fig)
+        return False
+
+    y_lo, y_hi = _yaxis_bounds(all_values, pad=0.08)
+    legend_entries: dict[str, str] = {}  # run_name -> color (preserves order)
+
+    for j, mp in enumerate(mission):
+        ax = axes[0, j]
+        for name, color, pair in pairs_per_panel[j]:
+            xu, vu, xl, vl = _split_surfaces(pair[0], pair[1])
+            ax.plot(xu, vu, color=color, lw=1.8, alpha=0.95)
+            ax.plot(xl, vl, color=color, lw=1.8, alpha=0.95, ls="--")
+            legend_entries.setdefault(name, color)
+        ax.set_xlim(-0.02, 1.02)
+        ax.set_ylim(y_lo, y_hi)
+        if quantity.invert_y:
+            ax.invert_yaxis()
+        if quantity.symlog:
+            ax.set_yscale("symlog", linthresh=1.0e-3)
+        ax.set_xlabel(r"$x/c$  (Chordwise position)")
+        if j == 0:
+            ax.set_ylabel(f"{quantity.symbol}  ({quantity.description})")
+        ax.set_title(f"{mp.pretty}: α = {mp.alpha:.1f}°, Re = {mp.reynolds:.0e}, M = {mp.mach:.2f}")
+        ax.grid(alpha=0.25, ls="--")
+
+    # Single legend on the right-most panel: one entry per run + the two
+    # line-style entries (solid=upper, dashed=lower).
+    handles = [Line2D([0], [0], color=c, lw=1.8, label=name) for name, c in legend_entries.items()]
+    handles += [
+        Line2D([0], [0], color="0.4", lw=1.8, label="Upper surface"),
+        Line2D([0], [0], color="0.4", lw=1.8, ls="--", label="Lower surface"),
+    ]
+    axes[0, -1].legend(handles=handles, loc="best", fontsize=8.4)
+
+    fig.suptitle(
+        f"Champion comparison — {quantity.description} at every mission leg",
+        fontsize=12.5,
+        fontweight="semibold",
+        y=0.99,
+    )
+    fig.subplots_adjust(left=0.06, right=0.99, top=0.86, bottom=0.14, wspace=0.28)
+    out_png.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_png, dpi=180)
+    plt.close(fig)
+    return True
+
+
 # ========================================================================== #
 # 15. DRIVERS — build solver / evaluator / study, run, capture champion
 # ========================================================================== #
@@ -1929,7 +2411,7 @@ def run_one_optimisation(
 def main() -> None:  # noqa: PLR0915
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", type=Path, default=Path("docs/assets"))
-    parser.add_argument("--pop", type=int, default=50)
+    parser.add_argument("--pop", type=int, default=25)
     parser.add_argument("--n-gen", type=int, default=50)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--fps", type=int, default=4)
@@ -2035,6 +2517,15 @@ def main() -> None:  # noqa: PLR0915
         render_comparison_mission_performance(runs, cmp_dir / "champion_mission_performance.png")
         render_comparison_design_parameters(runs, cmp_dir / "champion_design_parameters.png")
         render_comparison_pareto_overlay(runs, cmp_dir / "pareto_overlay.png")
+        # Champion wall-quantity comparisons — one PNG per quantity.
+        cmp_wall_dir = cmp_dir / "wall_quantities"
+        for quantity in WALL_QUANTITIES:
+            render_comparison_wall_quantity(
+                runs=runs,
+                quantity=quantity,
+                mission=MISSION,
+                out_png=cmp_wall_dir / f"champion_{quantity.key}.png",
+            )
         print(f"  comparison assets → {cmp_dir.resolve()}")
 
     print("\nDone. Drop the assets onto your portfolio site.")
