@@ -7,12 +7,13 @@ Layered design (top down):
 * :class:`XfoilSession` -- a declarative description of one XFOIL run.
 * :class:`XfoilCommand` -- a fluent builder for XFOIL stdin command scripts.
 * :class:`XfoilOutputParser` -- pure parsers for polar and Cp output files.
-* Result dataclasses :class:`PolarPoint`, :class:`Polar`, :class:`CpDistribution`.
+* Result dataclasses :class:`PolarPoint`, :class:`Polar`, :class:`CpDistribution`,
+  :class:`WallProfile`.
 """
 
 from aeroforge.solver.xfoil.commands import XfoilCommand
 from aeroforge.solver.xfoil.parser import XfoilOutputParser
-from aeroforge.solver.xfoil.results import CpDistribution, Polar, PolarPoint
+from aeroforge.solver.xfoil.results import CpDistribution, Polar, PolarPoint, WallProfile
 from aeroforge.solver.xfoil.runner import XfoilRunner
 from aeroforge.solver.xfoil.session import XfoilSession
 
@@ -24,4 +25,5 @@ __all__ = [
     "PolarPoint",
     "Polar",
     "CpDistribution",
+    "WallProfile",
 ]

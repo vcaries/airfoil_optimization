@@ -12,7 +12,7 @@ from pathlib import Path
 from aeroforge.core.exceptions import ParsingError
 from aeroforge.core.logging import get_logger
 from aeroforge.core.types import FloatArray, OperatingPoint
-from aeroforge.solver.xfoil.results import CpDistribution, Polar, PolarPoint
+from aeroforge.solver.xfoil.results import CpDistribution, Polar, PolarPoint, WallProfile
 
 PathLike = str | Path
 
@@ -160,13 +160,22 @@ class XfoilOutputParser:
                 if not stripped or stripped.startswith("#"):
                     continue
                 fields = stripped.split()
+                # XFOIL ``CPWR`` emits either ``x Cp`` (2 columns) or
+                # ``x y Cp`` (3 columns) depending on the build. We read x
+                # as the first field and Cp as the *last* numeric field.
+                # Non-numeric lines (free-text header, comments without
+                # a leading ``#``, wake-delimiter markers some builds add)
+                # are silently skipped so they cannot kill an otherwise
+                # valid parse.
                 if len(fields) < 2:
-                    raise ParsingError(f"Cp row has < 2 fields: {raw!r}")
+                    continue
                 try:
-                    xs.append(float(fields[0]))
-                    cps.append(float(fields[1]))
-                except ValueError as exc:
-                    raise ParsingError(f"Cannot parse Cp row {raw!r}: {exc}") from exc
+                    x_val = float(fields[0])
+                    cp_val = float(fields[-1])
+                except ValueError:
+                    continue
+                xs.append(x_val)
+                cps.append(cp_val)
 
         if not xs:
             raise ParsingError(f"No Cp data points found in {path}.")
@@ -175,3 +184,60 @@ class XfoilOutputParser:
         cp_arr: FloatArray = np.asarray(cps, dtype=np.float64)
         _log.debug("Parsed %d Cp points from %s", x_arr.size, path)
         return CpDistribution(operating_point=point, x=x_arr, cp=cp_arr)
+
+    @staticmethod
+    def parse_bl_dump(path: PathLike, point: OperatingPoint) -> WallProfile:
+        """Parse an XFOIL ``DUMP`` boundary-layer file.
+
+        XFOIL writes eight whitespace-separated columns per row:
+        ``s x y Ue/Vinf Dstar Theta Cf H``. Header lines (starting with
+        ``#``) and blank lines are skipped. Some XFOIL builds add a few
+        trailing wake rows after the airfoil panels — those are kept in
+        the returned profile so the caller can detect and slice them off.
+
+        Args:
+            path: Path to the BL dump file written by XFOIL's ``DUMP``.
+            point: Operating point the dump was generated at.
+
+        Returns:
+            A :class:`WallProfile` whose arrays hold one entry per panel.
+
+        Raises:
+            ParsingError: If no parseable rows are found or a row has
+                fewer than eight numeric fields.
+        """
+        import numpy as np  # local import: parsers are otherwise NumPy-free
+
+        path = Path(path)
+        cols: list[list[float]] = [[] for _ in range(8)]
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            for raw in handle:
+                stripped = raw.strip()
+                if not stripped or stripped.startswith("#"):
+                    continue
+                fields = stripped.split()
+                if len(fields) < 8:
+                    raise ParsingError(f"BL row has {len(fields)} fields, expected 8: {raw!r}")
+                try:
+                    values = [float(f) for f in fields[:8]]
+                except ValueError as exc:
+                    raise ParsingError(f"Cannot parse BL row {raw!r}: {exc}") from exc
+                for i, v in enumerate(values):
+                    cols[i].append(v)
+
+        if not cols[0]:
+            raise ParsingError(f"No BL data points found in {path}.")
+
+        arrays = tuple(np.asarray(c, dtype=np.float64) for c in cols)
+        _log.debug("Parsed %d BL points from %s", arrays[0].size, path)
+        return WallProfile(
+            operating_point=point,
+            s=arrays[0],
+            x=arrays[1],
+            y=arrays[2],
+            ue_vinf=arrays[3],
+            delta_star=arrays[4],
+            theta=arrays[5],
+            cf=arrays[6],
+            h=arrays[7],
+        )

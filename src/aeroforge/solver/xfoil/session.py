@@ -35,12 +35,24 @@ class XfoilSession:
     n_crit: float = 9.0
     repanel: bool = True
 
-    def to_command_script(self, *, dat_path: str, polar_path: str | None = None) -> str:
+    def to_command_script(
+        self,
+        *,
+        dat_path: str,
+        polar_path: str | None = None,
+        cp_path: str | None = None,
+        bl_path: str | None = None,
+    ) -> str:
         """Render this session into an XFOIL stdin transcript.
 
         Args:
             dat_path: Path to the ``.dat`` file XFOIL should load.
             polar_path: Optional polar-accumulation output file.
+            cp_path: Optional Cp dump file. Written via ``CPWR`` after the
+                last alpha converges; only meaningful for single-point runs.
+            bl_path: Optional boundary-layer dump file. Written via ``DUMP``
+                after the last alpha converges, requires the OPER state to
+                be viscous-converged. Only meaningful for single-point runs.
 
         Returns:
             The newline-separated command transcript.
@@ -66,6 +78,17 @@ class XfoilSession:
 
         for point in self.operating_points:
             cmd.alpha(point.alpha)
+
+        # Cp + BL dumps reflect the state of the *last* converged alpha.
+        # We issue them BEFORE closing the polar accumulator: some XFOIL
+        # builds appear to short-circuit ``CPWR`` when emitted after a
+        # ``PACC`` close, which is hard to detect (the file silently never
+        # appears). Issuing the dumps while the accumulator is still open
+        # is the safe canonical order; PACC close still works afterwards.
+        if cp_path is not None:
+            cmd.dump_cp(cp_path)
+        if bl_path is not None:
+            cmd.dump_bl(bl_path)
 
         if polar_path is not None:
             cmd.polar_close()
